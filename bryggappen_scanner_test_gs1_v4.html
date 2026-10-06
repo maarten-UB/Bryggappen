@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="sv">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Bryggappen – kodskanner test</title>
+<meta name="theme-color" content="#18b398">
+<style>
+*{box-sizing:border-box}body{margin:0;background:#18b398;font-family:Arial,sans-serif;padding:18px;color:#222}
+main{max-width:520px;margin:auto}h1{color:#fff;font-size:26px;margin:0 0 6px}
+.sub{color:#eafffa;margin:0 0 16px}.card{background:#fff;border-radius:18px;padding:16px;margin:0 0 16px;box-shadow:0 3px 10px #0002}
+button,label.btn{display:block;width:100%;padding:14px;margin-top:10px;border:0;border-radius:12px;background:#18b398;color:#fff;font-size:18px;font-weight:bold;text-align:center}
+button.secondary,label.btn.secondary{background:#eee;color:#222}#reader{width:100%;overflow:hidden;border-radius:12px;background:#111}
+.status{font-size:14px;color:#666;margin-top:10px}.ok{color:#087a5f}.warn{color:#9a6500}
+.lbl{font-size:13px;font-weight:bold;color:#666;margin-top:12px}.result{font-family:monospace;background:#f3f3f3;border-radius:10px;padding:11px;word-break:break-all;margin-top:5px}
+input{width:100%;padding:12px;border:1px solid #bbb;border-radius:10px;font-size:18px}.batch{font-family:Arial;font-weight:bold;font-size:22px}
+.small{font-size:13px;color:#666;line-height:1.4}.hidden{display:none}
+</style>
+<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+</head>
+<body>
+<main>
+<h1>📷 Kodskanner – test</h1>
+<p class="sub">QR / DataMatrix / GS1</p>
+
+<section class="card">
+<div id="reader"></div>
+<div id="status" class="status">Tryck på Starta kamera.</div>
+<button id="start">Starta kamera</button>
+<button id="stop" class="secondary hidden">Stoppa kamera</button>
+<label class="btn secondary" for="photo">📸 Ta högupplöst foto</label>
+<input id="photo" type="file" accept="image/*" capture="environment" class="hidden">
+<label class="btn secondary" for="file">📁 Läs kod från bild</label>
+<input id="file" type="file" accept="image/*" class="hidden">
+<p class="small">Bildskanning är praktiskt för att testa foton av era malt- och humleetiketter. Kameran försöker använda hög upplösning för GS1-128/CODE_128. EAN-13 ignoreras.</p>
+</section>
+
+<section class="card">
+<div class="lbl">Avläst kod</div><div id="raw" class="result">–</div>
+<div class="lbl">Kodtyp</div><div id="fmt" class="result">–</div>
+<div class="lbl">Tolkning</div><div id="parsed" class="result">–</div>
+<div class="lbl">Batchnummer</div><input id="batch" class="batch" readonly>
+<button id="copy">Kopiera batchnummer</button>
+</section>
+
+<section class="card">
+<strong>Manuellt GS1-test</strong>
+<p class="small">Testa exempelvis Viking-koden genom att klistra in den kodade texten.</p>
+<input id="manual" placeholder="010643005489002113260522310200250010LK0601205536">
+<button id="parse">Tolka GS1</button>
+</section>
+</main>
+
+<script>
+let scanner=null, running=false;
+const $=id=>document.getElementById(id);
+function status(t,c=''){$('status').textContent=t;$('status').className='status '+c}
+function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+function parseGs1(text){
+  let t=String(text||'').trim();
+
+  // Symbology identifier, t.ex. ]C1, följer inte med i GS1-datan.
+  t=t.replace(/^\]C1/i,'');
+
+  // FNC1/separator kan komma som ASCII 29. Vid manuell test kan | användas.
+  t=t.replace(/\x1d/g,'|');
+
+  const fields=[];
+  let pos=0;
+  let batch='';
+
+  // Fasta GS1-fält som vi behöver för råvaruetiketterna.
+  const fixedLengths={
+    '01':14,
+    '11':6,
+    '13':6,
+    '15':6,
+    '17':6
+  };
+
+  function addField(ai,value){
+    fields.push({ai:ai,value:value});
+    if(ai==='10') batch=value;
+  }
+
+  while(pos<t.length){
+    if(t[pos]==='|'){pos++;continue;}
+
+    const ai2=t.slice(pos,pos+2);
+    const ai4=t.slice(pos,pos+4);
+
+    // AI 310n = nettovikt i kg med n decimaler, 6 tecken efter AI.
+    if(/^310[0-9]$/.test(ai4)){
+      const value=t.slice(pos+4,pos+10);
+      if(value.length!==6 || !/^\d{6}$/.test(value)) return null;
+      const decimals=Number(ai4[3]);
+      const number=Number(value)/Math.pow(10,decimals);
+      addField(ai4,number.toFixed(decimals).replace('.',',')+' kg');
+      pos+=10;
+      continue;
+    }
+
+    // AI 10 = batch/lot. Det är variabelt och ska normalt avslutas med FNC1.
+    // Om ingen separator finns är AI 10 enligt GS1 ett sista fält: allt till slutet hör till batchen.
+    if(ai2==='10'){
+      pos+=2;
+      const sep=t.indexOf('|',pos);
+      const value=(sep===-1?t.slice(pos):t.slice(pos,sep)).trim();
+      if(!value)return null;
+      addField('10',value);
+      pos=sep===-1?t.length:sep+1;
+      continue;
+    }
+
+    if(Object.prototype.hasOwnProperty.call(fixedLengths,ai2)){
+      const len=fixedLengths[ai2];
+      const value=t.slice(pos+2,pos+2+len);
+      if(value.length!==len || !/^\d+$/.test(value)) return null;
+      addField(ai2,value);
+      pos+=2+len;
+      continue;
+    }
+
+    // Några vanliga variabla GS1-AI:n. De kräver FNC1 om något kommer efter.
+    if(/^(20|21|30|37|400|401|402|410|414|416|422|7003|8005)$/.test(t.slice(pos,pos+4)) ||
+       /^(20|21|30|37|400|401|402|410|414|416|422)$/.test(ai2)){
+      const ai= t.slice(pos,pos+3).match(/^(400|401|402|410|414|416|422)$/)
+        ? t.slice(pos,pos+3)
+        : ai2;
+      pos+=ai.length;
+      const sep=t.indexOf('|',pos);
+      const value=(sep===-1?t.slice(pos):t.slice(pos,sep)).trim();
+      if(!value)return null;
+      addField(ai,value);
+      pos=sep===-1?t.length:sep+1;
+      continue;
+    }
+
+    // Okänd AI -> det här är sannolikt inte en GS1-sträng.
+    return null;
+  }
+
+  if(!fields.length || !batch)return null;
+  return {fields:fields,batch:batch};
+}
+
+function parseCode(text){
+  const original=String(text||'').trim();
+  const cleaned=original.replace(/^\]C1/i,'').replace(/\x1d/g,'|');
+
+  // GS1 ska börja med ]C1 eller med ett tydligt GS1 AI, normalt 01.
+  const looksGs1=/^\]C1/i.test(original) || /^01\d{14}/.test(cleaned);
+
+  if(looksGs1){
+    const gs1=parseGs1(original);
+    if(gs1){
+      return {
+        type:'GS1',
+        batch:gs1.batch,
+        why:'AI (10) = batch/lot',
+        fields:gs1.fields
+      };
+    }
+  }
+
+  return {
+    type:'QR/DataMatrix',
+    batch:cleaned,
+    why:'Hela kodinnehållet används',
+    fields:[]
+  };
+}
+function show(text,format){
+  const r=parseCode(text);
+  $('raw').textContent=text;
+  $('fmt').textContent=format||'Okänd';
+
+  if(r.type==='GS1' && r.fields.length){
+    const labels={
+      '01':'GTIN',
+      '10':'Batch/lot',
+      '11':'Produktionsdatum',
+      '13':'Förpackningsdatum',
+      '15':'Bäst före',
+      '17':'Utgångsdatum'
+    };
+    const lines=r.fields.map(f=>
+      '<b>AI '+esc(f.ai)+'</b> '+esc(labels[f.ai]||'')+': '+esc(f.value)
+    );
+    $('parsed').innerHTML='<b>GS1</b><br>'+lines.join('<br>')+'<br><br><b>Batch/lot:</b> '+esc(r.batch);
+  }else{
+    $('parsed').innerHTML='<b>'+esc(r.type)+'</b><br>'+esc(r.why);
+  }
+
+  $('batch').value=r.batch;
+  status('✓ Kod avläst','ok');
+}
+async function start(){
+  if(running)return;
+  try{
+    scanner=new Html5Qrcode('reader');
+    await scanner.start({facingMode:{exact:'environment'}},{
+      fps:10,
+      aspectRatio:1.777,
+      disableFlip:false,
+      useBarCodeDetectorIfSupported:false,
+      // Be mobilen om en högupplöst bakre kamerabild. Webbläsaren kan
+      // välja närmaste upplösning som hårdvaran faktiskt stöder.
+      videoConstraints:{
+        facingMode:{ideal:'environment'},
+        width:{ideal:2560},
+        height:{ideal:1440},
+        frameRate:{ideal:15,max:30}
+      },
+      // Vi vill bara läsa de kodtyper som är relevanta för batchnummer:
+      // GS1-128/CODE_128, DataMatrix och QR.
+      // EAN-13, EAN-8, UPC, ITF m.fl. är medvetet borttagna.
+      // Ingen qrbox används här: hela kamerabilden får sökas, vilket
+      // är bättre för långa GS1-128-streckkoder.
+      formatsToSupport:[
+        Html5QrcodeSupportedFormats.CODE_128,
+        Html5QrcodeSupportedFormats.DATA_MATRIX,
+        Html5QrcodeSupportedFormats.QR_CODE
+      ]
+    },(text,res)=>{let f='Okänd';try{f=res.result.format.formatName}catch(e){}show(text,f);stop()},()=>{});
+    running=true;$('start').classList.add('hidden');$('stop').classList.remove('hidden');status('Kamera aktiv – rikta mot koden.','ok');
+  }catch(e){console.error(e);status('Kunde inte starta kameran: '+e,'warn')}
+}
+async function stop(){
+  if(!scanner||!running)return;
+  try{await scanner.stop();scanner.clear()}catch(e){}
+  running=false;$('start').classList.remove('hidden');$('stop').classList.add('hidden');
+}
+$('start').onclick=start;$('stop').onclick=stop;
+async function scanImageFile(file){
+  if(!file)return;
+  try{
+    if(running)await stop();
+    scanner=new Html5Qrcode('reader',{
+      formatsToSupport:[
+        Html5QrcodeSupportedFormats.CODE_128,
+        Html5QrcodeSupportedFormats.DATA_MATRIX,
+        Html5QrcodeSupportedFormats.QR_CODE
+      ],
+      useBarCodeDetectorIfSupported:false
+    });
+
+    status('Läser bilden i originalupplösning...');
+    const result=await scanner.scanFileV2(file,true);
+    const formatName=result.result && result.result.format
+      ? result.result.format.formatName
+      : 'Okänd';
+
+    // Skydd: även om en decoder skulle returnera EAN-13 ska vi aldrig
+    // acceptera den som batchkod.
+    if(formatName==='EAN_13' || formatName==='EAN_8' ||
+       formatName==='UPC_A' || formatName==='UPC_E' ||
+       formatName==='UPC_EAN_EXTENSION') {
+      status('EAN/UPC-kod hittades – ignorerar den. Beskär närmare GS1-128/DataMatrix och försök igen.','warn');
+      return;
+    }
+
+    show(result.decodedText,formatName);
+    scanner.clear();
+  }catch(e){
+    console.error(e);
+    status('Ingen relevant kod hittades. Försök med ett närmare foto av GS1-128/DataMatrix.','warn');
+  }
+}
+
+$('file').onchange=async function(){
+  const f=this.files&&this.files[0];
+  await scanImageFile(f);
+  this.value='';
+};
+
+$('photo').onchange=async function(){
+  const f=this.files&&this.files[0];
+  await scanImageFile(f);
+  this.value='';
+};
+
+$('copy').onclick=async()=>{if(!$('batch').value)return;try{await navigator.clipboard.writeText($('batch').value)}catch(e){$('batch').select();document.execCommand('copy')}status('Batchnummer kopierat.','ok')};
+$('parse').onclick=()=>{let t=$('manual').value.trim();if(t)show(t,'Manuell test')};
+</script>
+</body>
+</html>
