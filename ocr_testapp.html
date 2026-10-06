@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OCR-test – Bryggappen</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#18b398;font-family:Arial,sans-serif;color:#222;padding:20px}
+.container{max-width:520px;margin:0 auto;background:#fff;border-radius:16px;padding:20px;box-shadow:0 5px 25px rgba(0,0,0,.2)}
+h1{font-size:24px;margin:0 0 6px}
+.sub{color:#666;font-size:14px;margin:0 0 18px;line-height:1.4}
+button{width:100%;height:46px;border:0;border-radius:8px;font-size:16px;font-weight:bold;margin-top:8px;cursor:pointer;background:#18b398;color:#fff}
+button.secondary{background:#eee;color:#222}
+button:disabled{opacity:.5;cursor:default}
+#file{display:none}
+#status{min-height:22px;margin:14px 0 8px;font-size:14px;color:#666}
+#status.ok{color:#087a5f}
+#status.warn{color:#9a6500}
+.preview-wrap{display:none;margin:12px 0}
+.preview-wrap img{display:block;width:100%;max-height:320px;object-fit:contain;border:1px solid #ddd;border-radius:8px;background:#f5f5f5}
+label{display:block;font-size:13px;font-weight:bold;color:#666;margin:14px 0 5px}
+textarea{width:100%;min-height:220px;border:1px solid #aaa;border-radius:8px;padding:10px;font-size:16px;line-height:1.45;resize:vertical}
+.hint{font-size:12px;color:#777;line-height:1.4;margin-top:6px}
+.candidates{display:none;margin-top:14px;padding:12px;background:#f5f5f5;border-radius:8px}
+.candidates h2{font-size:16px;margin:0 0 8px}
+.candidate{display:block;width:100%;height:auto;text-align:left;background:#fff;color:#222;border:1px solid #ccc;margin:6px 0;padding:9px;border-radius:6px;font-weight:normal;font-family:monospace}
+.candidate:hover{background:#eee}
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>🔤 OCR-test</h1>
+  <p class="sub">Ta ett foto av en etikett utan QR- eller streckkod och låt telefonen läsa texten. Du kan sedan markera exakt den text du vill använda.</p>
+
+  <input id="file" type="file" accept="image/*" capture="environment">
+  <button id="take">📸 Ta foto / välj bild</button>
+  <button id="ocr" class="secondary" disabled>🔍 Läs text</button>
+
+  <div id="status">Ingen bild vald.</div>
+
+  <div id="previewWrap" class="preview-wrap">
+    <img id="preview" alt="Vald bild">
+  </div>
+
+  <div id="candidates" class="candidates">
+    <h2>Möjliga batchnummer</h2>
+    <div id="candidateList"></div>
+  </div>
+
+  <label for="result">OCR-resultat</label>
+  <textarea id="result" spellcheck="false" placeholder="Den avlästa texten visas här..."></textarea>
+  <div class="hint">Du kan trycka länge i texten på mobilen och markera precis den del du vill kopiera.</div>
+
+  <button id="selectAll" class="secondary">Markera all text</button>
+  <button id="copy">📋 Kopiera markerad text</button>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+<script>
+const fileInput=document.getElementById('file');
+const takeBtn=document.getElementById('take');
+const ocrBtn=document.getElementById('ocr');
+const statusEl=document.getElementById('status');
+const previewWrap=document.getElementById('previewWrap');
+const preview=document.getElementById('preview');
+const result=document.getElementById('result');
+const selectAll=document.getElementById('selectAll');
+const copyBtn=document.getElementById('copy');
+const candidates=document.getElementById('candidates');
+const candidateList=document.getElementById('candidateList');
+let selectedFile=null;
+
+function status(text,cls=''){
+  statusEl.textContent=text;
+  statusEl.className=cls;
+}
+
+takeBtn.addEventListener('click',()=>fileInput.click());
+
+fileInput.addEventListener('change',()=>{
+  const file=fileInput.files && fileInput.files[0];
+  if(!file)return;
+  selectedFile=file;
+  preview.src=URL.createObjectURL(file);
+  previewWrap.style.display='block';
+  ocrBtn.disabled=false;
+  result.value='';
+  candidates.style.display='none';
+  status('Bild vald. Tryck "Läs text".');
+});
+
+ocrBtn.addEventListener('click',async()=>{
+  if(!selectedFile)return;
+  ocrBtn.disabled=true;
+  takeBtn.disabled=true;
+  result.value='';
+  candidates.style.display='none';
+  status('Startar OCR...');
+  try{
+    const worker=await Tesseract.createWorker('swe+eng',1,{
+      logger:m=>{
+        if(m.status==='recognizing text' && typeof m.progress==='number'){
+          status('Läser text... '+Math.round(m.progress*100)+' %');
+        }else if(m.status){
+          status(m.status);
+        }
+      }
+    });
+    const {data}=await worker.recognize(selectedFile);
+    await worker.terminate();
+    result.value=(data.text||'').trim();
+    showCandidates(result.value);
+    status('✓ Klar. Markera den text du vill använda.','ok');
+  }catch(error){
+    console.error(error);
+    status('OCR-fel: '+(error.message||error),'warn');
+  }finally{
+    ocrBtn.disabled=false;
+    takeBtn.disabled=false;
+  }
+});
+
+function showCandidates(text){
+  const lines=text.split(/\n+/).map(s=>s.trim()).filter(Boolean);
+  const found=[];
+  const patterns=[
+    /\b(?:batch(?:\s*no)?|lot(?:\s*no)?|lotnr|batchnr)\s*[:#-]?\s*([A-Z0-9][A-Z0-9._/-]{3,})/i,
+    /\bREF\s*[:#-]\s*([A-Z0-9][A-Z0-9._/-]{3,})/i
+  ];
+  for(const line of lines){
+    for(const p of patterns){
+      const m=line.match(p);
+      if(m && m[1] && !found.includes(m[1]))found.push(m[1]);
+    }
+  }
+  if(!found.length)return;
+  candidateList.innerHTML='';
+  found.forEach(value=>{
+    const b=document.createElement('button');
+    b.className='candidate';
+    b.textContent=value;
+    b.title='Klicka för att välja detta värde';
+    b.addEventListener('click',()=>{
+      result.focus();
+      result.value=value;
+      result.select();
+      status('Valt: '+value,'ok');
+    });
+    candidateList.appendChild(b);
+  });
+  candidates.style.display='block';
+}
+
+selectAll.addEventListener('click',()=>{
+  result.focus();
+  result.select();
+});
+
+copyBtn.addEventListener('click',async()=>{
+  const selected=result.value.substring(result.selectionStart,result.selectionEnd);
+  const text=selected || result.value;
+  if(!text){status('Det finns ingen text att kopiera.','warn');return;}
+  try{
+    await navigator.clipboard.writeText(text);
+    status('✓ Kopierat till urklipp.','ok');
+  }catch(e){
+    result.focus();
+    result.select();
+    status('Texten är markerad – kopiera den manuellt.','warn');
+  }
+});
+</script>
+</body>
+</html>
